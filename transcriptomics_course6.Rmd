@@ -1,0 +1,184 @@
+---
+title: "Transcriptomics"
+output:
+  html_document: default
+  word_document: default
+---
+## Benodigde packages
+Om dit script te kunnen laten runnen zijn er een aantal packages nodig. Die worden geladen door de onderstaande code. 
+```{r error=FALSE, message=FALSE, warning=FALSE, results='hide'}
+library(edgeR)
+library(ggpubr)
+library(factoextra)
+library(rtracklayer)
+library(KEGGREST)
+library(pathview)
+```
+
+## Data van de read counts inladen
+Voor dit project zijn transcriptoom gegevens van het hele genoom van L. plantarum WCFS1 en NC8 gebruikt. De datasets zijn gegenereerd met RNA-Seq en zijn afgeleid van biologische monsters van L. plantarum gekweekt op twee verschillende media (glucose versus ribose). De dataset van de read counts wordt hieronder ingelezen. 
+```{r}
+fDir <-  "/home/janneke/Documents/HAN/Tutor/Course6/course6/"
+fName <- "RNA-Seq-counts.txt"
+cnts <- read.delim(paste0(fDir,fName), comment.char="#")
+
+row.names(cnts) <- cnts[,"ID"]
+```
+
+## DGEList
+Nadat de data is ingelezen, is alle data verwerkt in een DGE list.
+```{r}
+exp <- c("WCFS1.glc","WCFS1.glc","WCFS1.rib","WCFS1.rib", "NC8.glc","NC8.glc","NC8.rib","NC8.rib")
+
+group <- factor(exp)
+y <- DGEList(counts=cnts[,2:9],group=group)
+```
+
+## Normalise counts (TMM)
+Bij normalisatie worden waarden aangepast, zodat er rekening wordt gehouden met biologische variatie. Dit zorgt ervoor dat je beter de waarden met elkaar kunt vergelijken. Er zijn verschillende manieren om de data te normaliseren. Voor dit project is er gebruik gemaakt van de Trimmed Mean of M-values (TMM) methode.
+```{r}
+y <- calcNormFactors(y, method="TMM" )
+```
+
+## Check statistics
+```{r}
+print(summary(y$counts))
+print(y$samples)
+```
+
+## Create design matrix
+```{r}
+design <- model.matrix(~0+group, data=y$samples)
+colnames(design) <- levels(y$samples$group)
+print(design)
+```
+## Estimate Dispersion
+Dispersie is de maat variatie tussen metingen. Deze wordt hieronder berekend.
+```{r}
+y <- estimateGLMCommonDisp(y,design)
+y <- estimateGLMTrendedDisp(y,design, method="power")
+y <- estimateGLMTagwiseDisp(y,design)
+```
+### Principal Component Analysis
+De plot hieronder weergegeven is een PCA plot. Dit laat de verschillen tussen de acht samples zien. Hier zie je dat op de x-as dat de afstand tussen ribose en glucose, 2 is. Waardoor je kan zeggen dat glucose en ribose duidelijk van elkaar verschillen. 
+```{r}
+plotMDS(y)
+```
+
+### Dispersie plot
+De plot hieronder weergeggeven is een plot van de dispersie. Hier is op de x-as het aantal counts af te lezen en op de y-as de variatie. Hier is te zien dat hoge counts een kleiner variatie hebben. Dit komt omdat als je een absoluut verschil hebt dit in een hogere variatie resulteert met lagere reads.
+```{r}
+plotBCV(y)
+```
+
+## Fit data
+```{r}
+fit <- glmFit(y,design)
+heatmap(fit$counts, main="WCFS1-rib vs WCFS1-gluc vs NC8-rib vs NC8-gluc", ylab = "Genes")
+```
+
+## Fold verandering berekenen
+Fold veranderingen geven aan wat de verschil in genexpressie is tussen de samples ribose en glucose.  
+```{r}
+mc_NC8 <- makeContrasts(NC8=NC8.rib-NC8.glc, levels=design)
+mc_WCFS1 <- makeContrasts(WCFS1=WCFS1.rib-WCFS1.glc, levels=design)
+fit_NC8 <- glmLRT(fit, contrast=mc_NC8)
+fit_WCFS1 <- glmLRT(fit, contrast=mc_WCFS1)
+
+WCFS1_genes = fit_WCFS1[["table"]]
+NC8_genes = fit_NC8[["table"]]
+```
+Log van de fold verandering van WCFS1:
+```{r}
+WCFS1_logFC <- fit_WCFS1[["table"]][["logFC"]]
+head(WCFS1_logFC, 24)
+```
+Log van de fold verandering van NC8:
+```{r}
+NC8_logFC <- fit_NC8[["table"]][["logFC"]]
+head(NC8_logFC, 24)
+```
+
+## P-waarde berekenen
+```{r}
+p_values_WCFS1 <- fit_WCFS1[["table"]][["PValue"]]
+p_values_NC8 <- fit_NC8[["table"]][["PValue"]]
+head(p_values_WCFS1, 20)
+head(p_values_NC8, 20)
+```
+## Top tags
+```{r}
+res_WCFS1 <-topTags(fit_WCFS1, sort.by = "logFC", n=nrow(fit_WCFS1$table))
+res_NC8 <- topTags(fit_NC8, sort.by = "logFC", n=nrow(fit_WCFS1$table))
+```
+
+## Genen clusteren met kmeans
+```{r}
+# De data wordt gekanteld, zodat er klusters worden gevormd van de samples in plaast van de genen
+c_data = t(y$counts) 
+
+kcluster = kmeans(c_data, 4, nstart = 25)
+fviz_cluster(kcluster, data = c_data,
+             palette = c("#ff337a", "#33ff33", "#33ffca", "#33bbff"), 
+             geom = c("point", "text"),
+             ellipse.type = "convex", 
+             ggtheme = theme_bw())
+```
+## Genen clusteren met hclust
+```{r}
+# De afstanden tussen de samples worden berekend
+dist = dist(c_data, method = "euclidean")
+# Het dendrogram wordt gevormd en geplot
+hclust = hclust(dist)
+plot(hclust)
+```
+
+## Significante genen uit fit$table halen
+```{r}
+DEgenes_WCFS1 <- subset(res_WCFS1$table, FDR < 0.05)
+DEgenes_NC8 <- subset(res_NC8$table, FDR < 0.05)
+
+DEgenes_WCFS1 <- subset(DEgenes_WCFS1, logCPM > 3.5)
+DEgenes_NC8 <- subset(DEgenes_NC8, logCPM > 3.5)
+```
+
+Genen waarbij WCFS1 significante verandering in genexpressie tonen:
+```{r}
+WCFS1_DEgenes <- subset(DEgenes_WCFS1, (logFC < -1 | logFC > 1))
+nrow(WCFS1_DEgenes)
+WCFS1_DEgenes <- WCFS1_DEgenes[order(WCFS1_DEgenes$PValue),]
+head(WCFS1_DEgenes, 5)
+```
+Genen waarbij NC8 significante verandering in genexpressie tonen:
+```{r}
+NC8_DEgenes <- subset(DEgenes_NC8, (logFC < -1 | logFC > 1))
+nrow(NC8_DEgenes)
+NC8_DEgenes <- NC8_DEgenes[order(NC8_DEgenes$PValue),]
+head(NC8_DEgenes, 5)
+```
+
+```{r}
+# Visualiseren van genen in de Glycolyse pathway met de WCFS1 en NC8 genen
+mypathway <- "lpl00010"
+logFC <- WCFS1_DEgenes$logFC
+names(logFC) <- row.names(WCFS1_DEgenes)
+pathview(gene.data = logFC, species = "lpl", pathway = mypathway,  gene.idtype = "KEGG", out.suffix="WCFS1")
+
+mypathway <- "lpl00010"
+logFC <- NC8_DEgenes$logFC
+names(logFC) <- row.names(NC8_DEgenes)
+pathview(gene.data = logFC, species = "lpl", pathway = mypathway,  gene.idtype = "KEGG", out.suffix="NC8")
+```
+
+```{r}
+# Visualiseren van genen in de Pentose fosfaat pathway met de WCFS1 en NC8 genen
+mypathway <- "lpl00030"
+logFC <- WCFS1_DEgenes$logFC
+names(logFC) <- row.names(WCFS1_DEgenes)
+pathview(gene.data = logFC, species = "lpl", pathway = mypathway,  gene.idtype = "KEGG", out.suffix="WCFS1")
+
+mypathway <- "lpl00030"
+logFC <- NC8_DEgenes$logFC
+names(logFC) <- row.names(NC8_DEgenes)
+pathview(gene.data = logFC, species = "lpl", pathway = mypathway,  gene.idtype = "KEGG", out.suffix="NC8")
+```
